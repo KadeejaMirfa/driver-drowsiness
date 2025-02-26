@@ -7,7 +7,7 @@ import imutils
 import time
 import dlib
 import math
-from cv2 import cv2
+import cv2
 import numpy as np
 from EAR import eye_aspect_ratio
 from MAR import mouth_aspect_ratio
@@ -24,7 +24,7 @@ predictor = dlib.shape_predictor(
 # camera sensor to warm up
 print("[INFO] initializing camera...")
 
-vs = VideoStream(src=1).start()
+vs = VideoStream(src=0).start()
 # vs = VideoStream(usePiCamera=True).start() # Raspberry Pi
 time.sleep(2.0)
 
@@ -46,10 +46,41 @@ image_points = np.array([
 (lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
 (rStart, rEnd) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
 
-EYE_AR_THRESH = 0.25
+# Constants for drowsiness detection
+EYE_AR_THRESH = 0.20
 MOUTH_AR_THRESH = 0.79
+HEAD_TILT_THRESH = 22
 EYE_AR_CONSEC_FRAMES = 3
+LONG_CLOSED_FRAMES = 150  # 5 seconds at 30 fps
+HEAD_TILT_CONSEC_FRAMES = 90  # 3 seconds at 30 fps
+
+# Counters and time tracking
 COUNTER = 0
+LONG_COUNTER = 0
+HEAD_TILT_COUNTER = 0
+CONTINUOUS_HEAD_TILT_COUNTER = 0
+
+# Multiple events tracking
+blink_times = []
+yawn_times = []
+head_tilt_times = []
+current_time = time.time()
+
+# Initialize variables for tracking drowsiness events
+drowsy_events = {
+    'blinks': 0,
+    'yawns': 0,
+    'head_tilts': 0
+}
+
+def check_time_window(times_list, window_size=30):
+    """Remove events older than the window size and return count of recent events"""
+    current = time.time()
+    # Keep only events within the time window
+    times_list[:] = [t for t in times_list if (current - t) <= window_size]
+    return len(times_list)
+
+was_yawning = False
 
 # grab the indexes of the facial landmarks for the mouth
 (mStart, mEnd) = (49, 68)
@@ -59,6 +90,10 @@ while True:
     # have a maximum width of 400 pixels, and convert it to
     # grayscale
     frame = vs.read()
+    if frame is None:
+        print("Error: Could not read frame. Check if the camera is connected and accessible.")
+        exit()
+
     frame = imutils.resize(frame, width=1024, height=576)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     size = gray.shape
@@ -105,33 +140,53 @@ while True:
         # threshold, and if so, increment the blink frame counter
         if ear < EYE_AR_THRESH:
             COUNTER += 1
-            # if the eyes were closed for a sufficient number of times
-            # then show the warning
+            LONG_COUNTER += 1
+            
+            # Check for long eye closure (5 seconds)
+            if LONG_COUNTER >= LONG_CLOSED_FRAMES:
+                cv2.putText(frame, "DROWSINESS ALERT! Eyes Closed Too Long!", (10, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            # Check for multiple short eye closures
             if COUNTER >= EYE_AR_CONSEC_FRAMES:
                 cv2.putText(frame, "Eyes Closed!", (500, 20),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            # otherwise, the eye aspect ratio is not below the blink
-            # threshold, so reset the counter and alarm
+                
+                # Only count as a new blink if we just crossed the threshold
+                if COUNTER == EYE_AR_CONSEC_FRAMES:
+                    blink_times.append(time.time())
+                    recent_blinks = check_time_window(blink_times)
+                    if recent_blinks >= 5:
+                        cv2.putText(frame, "DROWSINESS ALERT! Frequent Blinking!", (10, 80),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         else:
             COUNTER = 0
+            LONG_COUNTER = 0
 
         mouth = shape[mStart:mEnd]
-
         mouthMAR = mouth_aspect_ratio(mouth)
         mar = mouthMAR
-        # compute the convex hull for the mouth, then
-        # visualize the mouth
+        
+        # compute the convex hull for the mouth, then visualize the mouth
         mouthHull = cv2.convexHull(mouth)
-
         cv2.drawContours(frame, [mouthHull], -1, (0, 255, 0), 1)
         cv2.putText(frame, "MAR: {:.2f}".format(mar), (650, 20), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        # Draw text if mouth is open
+        # Check for yawning
         if mar > MOUTH_AR_THRESH:
             cv2.putText(frame, "Yawning!", (800, 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
+            # Only count as a new yawn if we weren't yawning in the previous frame
+            if not was_yawning:
+                yawn_times.append(time.time())
+                recent_yawns = check_time_window(yawn_times)
+                if recent_yawns >= 3:  # 3 yawns in 30 seconds
+                    cv2.putText(frame, "DROWSINESS ALERT! Frequent Yawning!", (10, 110),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            was_yawning = True
+        else:
+            was_yawning = False
 
         # loop over the (x, y)-coordinates for the facial landmarks
         # and draw each of them
@@ -208,8 +263,28 @@ while True:
         cv2.line(frame, start_point, end_point_alt, (0, 0, 255), 2)
 
         if head_tilt_degree:
+            tilt_angle = abs(float(head_tilt_degree[0]))
             cv2.putText(frame, 'Head Tilt Degree: ' + str(head_tilt_degree[0]), (170, 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            
+            # Check for head tilt above threshold
+            if tilt_angle > HEAD_TILT_THRESH:
+                CONTINUOUS_HEAD_TILT_COUNTER += 1
+                
+                # Check for continuous head tilt
+                if CONTINUOUS_HEAD_TILT_COUNTER >= HEAD_TILT_CONSEC_FRAMES:
+                    cv2.putText(frame, "DROWSINESS ALERT! Head Tilt Too Long!", (10, 140),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                
+                # Check for multiple head tilts
+                if CONTINUOUS_HEAD_TILT_COUNTER == 1:  # Just started tilting
+                    head_tilt_times.append(time.time())
+                    recent_tilts = check_time_window(head_tilt_times)
+                    if recent_tilts >= 3:  # 3 tilts in 30 seconds
+                        cv2.putText(frame, "DROWSINESS ALERT! Frequent Head Tilting!", (10, 170),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            else:
+                CONTINUOUS_HEAD_TILT_COUNTER = 0
 
         # extract the mouth coordinates, then use the
         # coordinates to compute the mouth aspect ratio
