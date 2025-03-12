@@ -72,12 +72,48 @@ blink_alert_played = False
 yawn_alert_played = False
 head_tilt_alert_played = False
 
+# Alert display timers
+blink_alert_time = 0
+yawn_alert_time = 0
+head_tilt_alert_time = 0
+eyes_closed_alert_time = 0
+head_tilt_too_long_alert_time = 0
+
+# New variables for 2-second delay in alerts
+blink_condition_met_time = None
+yawn_condition_met_time = None
+head_tilt_condition_met_time = None
+ALERT_DELAY = 2.0  # 2 seconds delay
+
 def check_time_window(times_list, window_size=30):
     """Remove events older than the window size and return count of recent events"""
     current = time.time()
     # Keep only events within the time window
     times_list[:] = [t for t in times_list if (current - t) <= window_size]
     return len(times_list)
+
+def reset_alert_counters(alert_type):
+    """Reset specific alert counters after an alert has been triggered"""
+    current_time = time.time()
+    if alert_type == "blink":
+        blink_times.clear()
+        return current_time
+    elif alert_type == "yawn":
+        yawn_times.clear()
+        return current_time
+    elif alert_type == "head_tilt":
+        head_tilt_times.clear()
+        return current_time
+    elif alert_type == "eyes_closed":
+        return current_time
+    elif alert_type == "head_tilt_long":
+        return current_time
+    return 0
+
+def display_alert(frame, alert_text, position_y):
+    """Display an alert text on the frame at the specified vertical position"""
+    cv2.putText(frame, alert_text, (10, position_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
 was_yawning = False
 
@@ -103,6 +139,8 @@ while True:
         text = "{} face(s) found".format(len(rects))
         cv2.putText(frame, text, (10, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+    current_time = time.time()
 
     # Loop over the face detections
     for rect in rects:
@@ -140,9 +178,11 @@ while True:
             
             # Check for long eye closure (5 seconds)
             if LONG_COUNTER >= LONG_CLOSED_FRAMES:
-                cv2.putText(frame, "DROWSINESS ALERT! Eyes Closed Too Long!", (10, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            
+                display_alert(frame, "DROWSINESS ALERT! Eyes Closed Too Long!", 50)
+                if LONG_COUNTER == LONG_CLOSED_FRAMES:  # Just triggered
+                    playsound('beep.wav')  # Play beep sound for head tilt too long
+                    eyes_closed_alert_time = reset_alert_counters("eyes_closed")
+                    
             # Check for multiple short eye closures
             if COUNTER >= EYE_AR_CONSEC_FRAMES:
                 cv2.putText(frame, "Eyes Closed!", (500, 20),
@@ -153,11 +193,20 @@ while True:
                     blink_times.append(time.time())
                     recent_blinks = check_time_window(blink_times)
                     if recent_blinks >= 5:  # 5 blinks in 30 seconds
-                        cv2.putText(frame, "DROWSINESS ALERT! Frequent Blinking!", (10, 80),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        if not blink_alert_played:
-                            playsound('beep.wav')  # Play beep sound for frequent blinking
-                            blink_alert_played = True
+                        # Check if this is the first time condition is met
+                        if blink_condition_met_time is None:
+                            blink_condition_met_time = time.time()
+                        
+                        # If 2 seconds have passed since condition was met
+                        if time.time() - blink_condition_met_time >= ALERT_DELAY:
+                            display_alert(frame, "DROWSINESS ALERT! Frequent Blinking!", 80)
+                            if not blink_alert_played:
+                                playsound('beep.wav')  # Play beep sound for frequent blinking
+                                blink_alert_played = True
+                                blink_alert_time = reset_alert_counters("blink")
+                                blink_condition_met_time = None  # Reset the timer
+                    else:
+                        blink_condition_met_time = None  # Reset if conditions are no longer met
         else:
             COUNTER = 0
             LONG_COUNTER = 0
@@ -182,11 +231,20 @@ while True:
                 yawn_times.append(time.time())
                 recent_yawns = check_time_window(yawn_times)
                 if recent_yawns >= 3:  # 3 yawns in 30 seconds
-                    cv2.putText(frame, "DROWSINESS ALERT! Frequent Yawning!", (10, 110),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    if not yawn_alert_played:
-                        playsound('beep.wav')  # Play beep sound for frequent yawning
-                        yawn_alert_played = True
+                    # Check if this is the first time condition is met
+                    if yawn_condition_met_time is None:
+                        yawn_condition_met_time = time.time()
+                    
+                    # If 2 seconds have passed since condition was met
+                    if time.time() - yawn_condition_met_time >= ALERT_DELAY:
+                        display_alert(frame, "DROWSINESS ALERT! Frequent Yawning!", 110)
+                        if not yawn_alert_played:
+                            playsound('beep.wav')  # Play beep sound for frequent yawning
+                            yawn_alert_played = True
+                            yawn_alert_time = reset_alert_counters("yawn")
+                            yawn_condition_met_time = None  # Reset the timer
+                else:
+                    yawn_condition_met_time = None  # Reset if conditions are no longer met
             was_yawning = True
         else:
             was_yawning = False
@@ -251,19 +309,30 @@ while True:
                 
                 # Check for continuous head tilt
                 if CONTINUOUS_HEAD_TILT_COUNTER >= HEAD_TILT_CONSEC_FRAMES:
-                    cv2.putText(frame, "DROWSINESS ALERT! Head Tilt Too Long!", (10, 140),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    display_alert(frame, "DROWSINESS ALERT! Head Tilt Too Long!", 140)
+                    if CONTINUOUS_HEAD_TILT_COUNTER == HEAD_TILT_CONSEC_FRAMES:  # Just triggered
+                        playsound('beep.wav')  # Play beep sound for head tilt too long
+                        head_tilt_too_long_alert_time = reset_alert_counters("head_tilt_long")
         
                 # Check for multiple head tilts
                 if CONTINUOUS_HEAD_TILT_COUNTER == 1:  # Just started tilting
                     head_tilt_times.append(time.time())
                     recent_tilts = check_time_window(head_tilt_times)
                     if recent_tilts >= 5:  # 5 tilts in 30 seconds
-                        cv2.putText(frame, "DROWSINESS ALERT! Frequent Head Tilting!", (10, 170),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        if not head_tilt_alert_played:
-                            playsound('beep.wav')  # Play beep sound for frequent head tilts
-                            head_tilt_alert_played = True
+                        # Check if this is the first time condition is met
+                        if head_tilt_condition_met_time is None:
+                            head_tilt_condition_met_time = time.time()
+                        
+                        # If 2 seconds have passed since condition was met
+                        if time.time() - head_tilt_condition_met_time >= ALERT_DELAY:
+                            display_alert(frame, "DROWSINESS ALERT! Frequent Head Tilting!", 170)
+                            if not head_tilt_alert_played:
+                                playsound('beep.wav')  # Play beep sound for frequent head tilts
+                                head_tilt_alert_played = True
+                                head_tilt_alert_time = reset_alert_counters("head_tilt")
+                                head_tilt_condition_met_time = None  # Reset the timer
+                    else:
+                        head_tilt_condition_met_time = None  # Reset if conditions are no longer met
             else:
                 CONTINUOUS_HEAD_TILT_COUNTER = 0
                 head_tilt_alert_played = False  # Reset the alert flag
